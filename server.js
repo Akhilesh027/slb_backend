@@ -13,6 +13,7 @@ const corsOptions = {
     "http://localhost:3000",
     "http://localhost:5173",
     "http://10.26.146.28:3000",
+    "https://slbkuchipudi.netlify.app",
     "https://yourfrontenddomain.com",
   ],
   credentials: true,
