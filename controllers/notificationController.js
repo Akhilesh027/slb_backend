@@ -5,6 +5,10 @@ const adminRoles = ["admin", "super_admin"];
 
 const isAdmin = (req) => adminRoles.includes(req.user?.role);
 const getUserBranch = (req) => req.user?.branch || "";
+const getLoggedUserId = (req) => req.user?._id || req.user?.id;
+const getLoggedUserName = (req) => req.user?.name || "System User";
+
+const todayDate = () => new Date().toISOString().split("T")[0];
 
 const generateNotificationId = async () => {
   const prefix = "SLB-NOT-";
@@ -20,6 +24,7 @@ const generateNotificationId = async () => {
       lastNotification.notificationId.split("-").pop(),
       10
     );
+
     nextNumber = Number.isNaN(lastNumber) ? 1 : lastNumber + 1;
   }
 
@@ -34,10 +39,6 @@ const normalizeAudience = (role) => {
   return "All";
 };
 
-const getLoggedUserId = (req) => {
-  return req.user?._id || req.user?.id;
-};
-
 const getNotificationQueryByRole = (req) => {
   const role = req.user?.role;
 
@@ -48,7 +49,7 @@ const getNotificationQueryByRole = (req) => {
   const userId = getLoggedUserId(req);
 
   return {
-    status: "Active",
+    status: { $in: ["Active", "Sent", "Scheduled"] },
     $and: [
       {
         $or: [
@@ -62,6 +63,10 @@ const getNotificationQueryByRole = (req) => {
           { audience: "All" },
           { audience },
           { audience: "Specific" },
+          { audience: "Specific Branch" },
+          { audience: "Specific Batch" },
+          { audience: role === "student" ? "Specific Student" : "" },
+          { audience: role === "faculty" ? "Specific Faculty" : "" },
         ],
       },
       {
@@ -79,11 +84,35 @@ const getNotificationQueryByRole = (req) => {
 const restrictBranchAccess = (req, branchName) => {
   if (isAdmin(req)) return true;
 
-  if (!branchName || branchName === "All") {
-    return true;
-  }
+  if (!branchName || branchName === "All") return true;
 
   return getUserBranch(req) === branchName;
+};
+
+const resolveRecipient = async (req, recipientId) => {
+  if (!recipientId) {
+    return {
+      recipientId: null,
+      recipientName: "",
+    };
+  }
+
+  const recipient = await User.findById(recipientId).select(
+    "name email role branch status"
+  );
+
+  if (!recipient) {
+    throw new Error("Selected recipient not found");
+  }
+
+  if (!isAdmin(req) && recipient.branch !== getUserBranch(req)) {
+    throw new Error("Access denied for selected recipient");
+  }
+
+  return {
+    recipientId: recipient._id,
+    recipientName: recipient.name,
+  };
 };
 
 exports.createNotification = async (req, res) => {
@@ -94,8 +123,14 @@ exports.createNotification = async (req, res) => {
       type,
       audience,
       branch,
+      batch,
       recipientId,
+      recipientName,
+      priority,
+      sendType,
       date,
+      scheduledDate,
+      scheduledTime,
       status,
     } = req.body;
 
@@ -113,29 +148,26 @@ exports.createNotification = async (req, res) => {
       });
     }
 
-    let recipientName = "";
+    let recipientInfo = {
+      recipientId: null,
+      recipientName: recipientName || "",
+    };
 
     if (recipientId) {
-      const recipient = await User.findById(recipientId).select(
-        "name email role branch status"
-      );
-
-      if (!recipient) {
-        return res.status(404).json({
-          message: "Selected recipient not found",
+      try {
+        recipientInfo = await resolveRecipient(req, recipientId);
+      } catch (error) {
+        return res.status(
+          error.message.includes("not found") ? 404 : 403
+        ).json({
+          message: error.message,
         });
       }
-
-      if (!isAdmin(req) && recipient.branch !== getUserBranch(req)) {
-        return res.status(403).json({
-          message: "Access denied for selected recipient",
-        });
-      }
-
-      recipientName = recipient.name;
     }
 
     const notificationId = await generateNotificationId();
+
+    const finalSendType = sendType || "Send Now";
 
     const notification = await Notification.create({
       notificationId,
@@ -144,11 +176,19 @@ exports.createNotification = async (req, res) => {
       type: type || "General Announcement",
       audience: recipientId ? "Specific" : audience || "All",
       branch: finalBranch || "All",
-      recipientId: recipientId || null,
-      recipientName,
-      date: date || new Date().toISOString().split("T")[0],
-      status: status || "Active",
+      batch: batch || "",
+      recipientId: recipientInfo.recipientId,
+      recipientName: recipientInfo.recipientName,
+      priority: priority || "Medium",
+      sendType: finalSendType,
+      date: date || todayDate(),
+      scheduledDate: scheduledDate || "",
+      scheduledTime: scheduledTime || "",
+      status:
+        status ||
+        (finalSendType === "Schedule Later" ? "Scheduled" : "Active"),
       createdBy: getLoggedUserId(req),
+      createdByName: getLoggedUserName(req),
     });
 
     res.status(201).json({
@@ -165,6 +205,28 @@ exports.createNotification = async (req, res) => {
 exports.getNotifications = async (req, res) => {
   try {
     const query = getNotificationQueryByRole(req);
+
+    const {
+      type,
+      audience,
+      branch,
+      batch,
+      status,
+      priority,
+      isRead,
+      date,
+    } = req.query;
+
+    if (type) query.type = type;
+    if (audience) query.audience = audience;
+    if (branch) query.branch = branch;
+    if (batch) query.batch = batch;
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (date) query.date = date;
+
+    if (isRead === "true") query.isRead = true;
+    if (isRead === "false") query.isRead = false;
 
     const notifications = await Notification.find(query)
       .populate("recipientId", "name email role branch status")
@@ -224,9 +286,16 @@ exports.updateNotification = async (req, res) => {
       type,
       audience,
       branch,
+      batch,
       recipientId,
+      recipientName,
+      priority,
+      sendType,
       date,
+      scheduledDate,
+      scheduledTime,
       status,
+      isRead,
     } = req.body;
 
     const finalBranch = isAdmin(req)
@@ -239,26 +308,21 @@ exports.updateNotification = async (req, res) => {
       });
     }
 
-    let recipientName = notification.recipientName || "";
+    let recipientInfo = {
+      recipientId: notification.recipientId,
+      recipientName: notification.recipientName || "",
+    };
 
     if (recipientId) {
-      const recipient = await User.findById(recipientId).select(
-        "name email role branch status"
-      );
-
-      if (!recipient) {
-        return res.status(404).json({
-          message: "Selected recipient not found",
+      try {
+        recipientInfo = await resolveRecipient(req, recipientId);
+      } catch (error) {
+        return res.status(
+          error.message.includes("not found") ? 404 : 403
+        ).json({
+          message: error.message,
         });
       }
-
-      if (!isAdmin(req) && recipient.branch !== getUserBranch(req)) {
-        return res.status(403).json({
-          message: "Access denied for selected recipient",
-        });
-      }
-
-      recipientName = recipient.name;
     }
 
     notification.title = title || notification.title;
@@ -268,10 +332,28 @@ exports.updateNotification = async (req, res) => {
       ? "Specific"
       : audience || notification.audience;
     notification.branch = finalBranch || notification.branch;
-    notification.recipientId = recipientId || null;
-    notification.recipientName = recipientId ? recipientName : "";
+    notification.batch = batch !== undefined ? batch : notification.batch;
+    notification.recipientId = recipientId ? recipientInfo.recipientId : null;
+    notification.recipientName = recipientId
+      ? recipientInfo.recipientName
+      : recipientName || "";
+    notification.priority = priority || notification.priority;
+    notification.sendType = sendType || notification.sendType;
     notification.date = date || notification.date;
+    notification.scheduledDate =
+      scheduledDate !== undefined
+        ? scheduledDate
+        : notification.scheduledDate;
+    notification.scheduledTime =
+      scheduledTime !== undefined
+        ? scheduledTime
+        : notification.scheduledTime;
     notification.status = status || notification.status;
+
+    if (isRead !== undefined) {
+      notification.isRead = Boolean(isRead);
+      notification.readAt = isRead ? new Date().toISOString() : "";
+    }
 
     await notification.save();
 
@@ -282,6 +364,37 @@ exports.updateNotification = async (req, res) => {
     res.json({
       message: "Notification updated successfully",
       notification: updatedNotification,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: error.message,
+    });
+  }
+};
+
+exports.markNotificationRead = async (req, res) => {
+  try {
+    const query = {
+      _id: req.params.id,
+      ...getNotificationQueryByRole(req),
+    };
+
+    const notification = await Notification.findOne(query);
+
+    if (!notification) {
+      return res.status(404).json({
+        message: "Notification not found or access denied",
+      });
+    }
+
+    notification.isRead = true;
+    notification.readAt = new Date().toISOString();
+
+    await notification.save();
+
+    res.json({
+      message: "Notification marked as read",
+      notification,
     });
   } catch (error) {
     res.status(500).json({

@@ -103,7 +103,6 @@ const syncBatchEnrollmentCounts = async (...batchNames) => {
     })
   );
 };
-
 exports.createStudent = async (req, res) => {
   let createdStudent = null;
 
@@ -120,8 +119,10 @@ exports.createStudent = async (req, res) => {
       branch,
       course,
       batch,
+      batchType,
       trainingMode,
       admissionDate,
+      joinDate,
       feeStatus,
       attendancePercentage,
       status,
@@ -162,8 +163,10 @@ exports.createStudent = async (req, res) => {
       });
     }
 
+    let activeBatches = [];
+
     if (selectedBatches.length > 0) {
-      const activeBatches = await Batch.find({
+      activeBatches = await Batch.find({
         batchName: { $in: selectedBatches },
         branch,
         status: "Active",
@@ -174,6 +177,14 @@ exports.createStudent = async (req, res) => {
           message:
             "One or more selected batches are invalid, inactive, or not available in selected branch",
         });
+      }
+
+      for (const batchDoc of activeBatches) {
+        if (batchDoc.capacity > 0 && batchDoc.enrolled >= batchDoc.capacity) {
+          return res.status(400).json({
+            message: `${batchDoc.batchName} is full. No seats available.`,
+          });
+        }
       }
     }
 
@@ -200,8 +211,10 @@ exports.createStudent = async (req, res) => {
       branch,
       course,
       batch: selectedBatches,
-      trainingMode,
-      admissionDate,
+      batchType: batchType || "Morning",
+      trainingMode: trainingMode || "Offline",
+      admissionDate: admissionDate || joinDate,
+      joinDate: joinDate || admissionDate,
       feeStatus: feeStatus || "Pending",
       attendancePercentage: Number(attendancePercentage) || 0,
       status: status || "Active",
@@ -248,7 +261,6 @@ exports.createStudent = async (req, res) => {
     });
   }
 };
-
 exports.getStudents = async (req, res) => {
   try {
     const query = getStudentBranchFilter(req);
@@ -326,8 +338,10 @@ exports.updateStudent = async (req, res) => {
       branch,
       course,
       batch,
+      batchType,
       trainingMode,
       admissionDate,
+      joinDate,
       feeStatus,
       attendancePercentage,
       status,
@@ -410,13 +424,17 @@ exports.updateStudent = async (req, res) => {
     student.branch = branch || student.branch;
     student.course = course || student.course;
     student.batch = selectedBatches;
+    student.batchType = batchType || student.batchType;
     student.trainingMode = trainingMode || student.trainingMode;
-    student.admissionDate = admissionDate || student.admissionDate;
+    student.admissionDate = admissionDate || joinDate || student.admissionDate;
+    student.joinDate = joinDate || admissionDate || student.joinDate;
     student.feeStatus = feeStatus || student.feeStatus;
+
     student.attendancePercentage =
       attendancePercentage !== undefined
         ? Number(attendancePercentage) || 0
         : student.attendancePercentage;
+
     student.status = status || student.status;
 
     await student.save();

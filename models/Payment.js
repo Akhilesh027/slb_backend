@@ -6,6 +6,7 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+      trim: true,
     },
 
     studentId: {
@@ -20,13 +21,27 @@ const paymentSchema = new mongoose.Schema(
     branch: {
       type: String,
       required: true,
+      trim: true,
     },
 
     course: String,
 
+    totalFee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     amount: {
       type: Number,
       required: true,
+      min: 0,
+    },
+
+    dueAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
 
     mode: {
@@ -36,6 +51,12 @@ const paymentSchema = new mongoose.Schema(
     },
 
     transaction: String,
+
+    paymentDate: {
+      type: String,
+      default: "",
+    },
+
     date: String,
 
     proof: String,
@@ -58,5 +79,20 @@ const paymentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+paymentSchema.pre("save", function (next) {
+  if (!this.paymentDate && this.date) {
+    this.paymentDate = this.date;
+  }
+
+  if (!this.date && this.paymentDate) {
+    this.date = this.paymentDate;
+  }
+
+  if (this.totalFee > 0) {
+    this.dueAmount = Math.max(this.totalFee - this.amount, 0);
+  }
+
+});
 
 module.exports = mongoose.model("Payment", paymentSchema);

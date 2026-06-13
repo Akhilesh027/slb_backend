@@ -6,6 +6,7 @@ const eventSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+      trim: true,
     },
 
     name: {
@@ -17,6 +18,7 @@ const eventSchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
+      trim: true,
     },
 
     date: {
@@ -24,19 +26,49 @@ const eventSchema = new mongoose.Schema(
       required: true,
     },
 
+    startTime: {
+      type: String,
+      default: "",
+    },
+
+    endTime: {
+      type: String,
+      default: "",
+    },
+
+    registrationDeadline: {
+      type: String,
+      default: "",
+    },
+
+    coordinator: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    eventCoordinator: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     venue: {
       type: String,
-      required: true,
+     
+      trim: true,
     },
 
     branch: {
       type: String,
       required: true,
+      trim: true,
     },
 
     participants: {
       type: Number,
       default: 0,
+      min: 0,
     },
 
     status: {
@@ -49,5 +81,16 @@ const eventSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+eventSchema.pre("save", function (next) {
+  if (!this.eventCoordinator && this.coordinator) {
+    this.eventCoordinator = this.coordinator;
+  }
+
+  if (!this.coordinator && this.eventCoordinator) {
+    this.coordinator = this.eventCoordinator;
+  }
+
+});
 
 module.exports = mongoose.model("Event", eventSchema);

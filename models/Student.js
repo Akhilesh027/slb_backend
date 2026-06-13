@@ -11,6 +11,7 @@ const studentSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+      trim: true,
     },
 
     name: {
@@ -19,11 +20,22 @@ const studentSchema = new mongoose.Schema(
       trim: true,
     },
 
-    gender: String,
+    gender: {
+      type: String,
+      enum: ["Female", "Male", "Other"],
+    },
+
     dob: String,
 
-    parentName: String,
-    parentMobile: String,
+    parentName: {
+      type: String,
+      trim: true,
+    },
+
+    parentMobile: {
+      type: String,
+      trim: true,
+    },
 
     studentMobile: {
       type: String,
@@ -44,11 +56,13 @@ const studentSchema = new mongoose.Schema(
     branch: {
       type: String,
       required: true,
+      trim: true,
     },
 
     course: {
       type: String,
       required: true,
+      trim: true,
     },
 
     batch: {
@@ -56,8 +70,21 @@ const studentSchema = new mongoose.Schema(
       default: [],
     },
 
-    trainingMode: String,
+    batchType: {
+      type: String,
+      enum: ["Morning", "Evening"],
+      default: "Morning",
+    },
+
+    trainingMode: {
+      type: String,
+      enum: ["Offline", "Online", "Hybrid"],
+      default: "Offline",
+    },
+
     admissionDate: String,
+
+    joinDate: String,
 
     feeStatus: {
       type: String,
@@ -68,6 +95,8 @@ const studentSchema = new mongoose.Schema(
     attendancePercentage: {
       type: Number,
       default: 0,
+      min: 0,
+      max: 100,
     },
 
     status: {

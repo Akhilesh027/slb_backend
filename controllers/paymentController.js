@@ -9,6 +9,8 @@ const isAdmin = (req) => adminRoles.includes(req.user?.role);
 const getUserBranch = (req) => req.user?.branch || "";
 const getLoggedUserId = (req) => req.user?._id || req.user?.id;
 
+const todayDate = () => new Date().toISOString().split("T")[0];
+
 const generatePaymentId = async () => {
   const prefix = "SLB-PAY-";
 
@@ -58,6 +60,47 @@ const findStudentSafely = async (studentId) => {
   });
 };
 
+const calculateDueAmount = (totalFee, amount) => {
+  return Math.max((Number(totalFee) || 0) - (Number(amount) || 0), 0);
+};
+
+const calculateStudentFeeStatus = (payment) => {
+  if (payment.status !== "Approved") return null;
+
+  if (Number(payment.dueAmount) <= 0) return "Paid";
+
+  if (Number(payment.amount) > 0) return "Partial";
+
+  return "Pending";
+};
+
+const syncStudentFeeStatus = async (studentId) => {
+  const approvedPayments = await Payment.find({
+    studentId,
+    status: "Approved",
+  }).sort({ createdAt: -1 });
+
+  if (!approvedPayments.length) {
+    await Student.findByIdAndUpdate(studentId, {
+      feeStatus: "Pending",
+    });
+    return;
+  }
+
+  const latestPayment = approvedPayments[0];
+
+  const feeStatus =
+    Number(latestPayment.dueAmount) <= 0
+      ? "Paid"
+      : Number(latestPayment.amount) > 0
+      ? "Partial"
+      : "Pending";
+
+  await Student.findByIdAndUpdate(studentId, {
+    feeStatus,
+  });
+};
+
 const createPaymentStatusNotification = async ({
   req,
   student,
@@ -74,8 +117,10 @@ const createPaymentStatusNotification = async ({
   let message = `Dear ${student.name}, your payment ${payment.paymentId} status has been updated to ${newStatus}.`;
 
   if (newStatus === "Approved") {
+    const feeStatus = calculateStudentFeeStatus(payment);
+
     title = "Payment Approved";
-    message = `Dear ${student.name}, your payment of ₹${payment.amount} has been approved. Your fee status is now Paid.`;
+    message = `Dear ${student.name}, your payment of ₹${payment.amount} has been approved. Fee status: ${feeStatus}. Due amount: ₹${payment.dueAmount}.`;
   }
 
   if (newStatus === "Rejected") {
@@ -92,7 +137,7 @@ const createPaymentStatusNotification = async ({
     branch: student.branch,
     recipientId: student.userId,
     recipientName: student.name,
-    date: new Date().toISOString().split("T")[0],
+    date: todayDate(),
     status: "Active",
     createdBy: getLoggedUserId(req),
   });
@@ -127,9 +172,12 @@ exports.createPayment = async (req, res) => {
       studentCode,
       branch,
       course,
+      totalFee,
       amount,
+      dueAmount,
       mode,
       transaction,
+      paymentDate,
       date,
       proof,
       status,
@@ -160,6 +208,13 @@ exports.createPayment = async (req, res) => {
       ? `/uploads/payments/${req.file.filename}`
       : null;
 
+    const finalTotalFee = Number(totalFee) || Number(student.totalFee) || 0;
+    const finalAmount = Number(amount) || 0;
+    const finalDueAmount =
+      dueAmount !== undefined && dueAmount !== ""
+        ? Number(dueAmount) || 0
+        : calculateDueAmount(finalTotalFee, finalAmount);
+
     const paymentId = await generatePaymentId();
 
     const payment = await Payment.create({
@@ -169,15 +224,25 @@ exports.createPayment = async (req, res) => {
       studentCode: studentCode || student.studentId,
       branch: branch || student.branch,
       course: course || student.course,
-      amount: Number(amount),
+
+      totalFee: finalTotalFee,
+      amount: finalAmount,
+      dueAmount: finalDueAmount,
+
       mode,
       transaction,
-      date: date || new Date().toISOString().split("T")[0],
+      paymentDate: paymentDate || date || todayDate(),
+      date: paymentDate || date || todayDate(),
+
       proof: uploadedFilePath || proof,
       proofFileName: req.file?.originalname || "",
       status: status || "Pending",
       remarks,
     });
+
+    if (payment.status === "Approved") {
+      await syncStudentFeeStatus(payment.studentId);
+    }
 
     res.status(201).json({
       message: "Payment submitted successfully",
@@ -194,8 +259,17 @@ exports.getPayments = async (req, res) => {
   try {
     const query = getPaymentQueryByRole(req);
 
+    const { branch, course, mode, status, studentId } = req.query;
+
+    if (branch) query.branch = branch;
+    if (course) query.course = course;
+    if (mode) query.mode = mode;
+    if (status) query.status = status;
+    if (studentId) query.studentId = studentId;
+
     const payments = await Payment.find(query)
-      .populate("studentId", "name studentId branch course batch userId")
+      .populate("studentId", "name studentId branch course batch userId feeStatus totalFee fee")
+      .populate("verifiedBy", "name email role")
       .sort({ createdAt: -1 });
 
     res.json(payments);
@@ -213,10 +287,9 @@ exports.getPaymentById = async (req, res) => {
       ...getPaymentQueryByRole(req),
     };
 
-    const payment = await Payment.findOne(query).populate(
-      "studentId",
-      "name studentId branch course batch userId"
-    );
+    const payment = await Payment.findOne(query)
+      .populate("studentId", "name studentId branch course batch userId feeStatus totalFee fee")
+      .populate("verifiedBy", "name email role");
 
     if (!payment) {
       return res.status(404).json({
@@ -248,6 +321,7 @@ exports.updatePayment = async (req, res) => {
     }
 
     const oldStatus = payment.status;
+    const oldStudentId = payment.studentId;
 
     const {
       studentId,
@@ -255,9 +329,12 @@ exports.updatePayment = async (req, res) => {
       studentCode,
       branch,
       course,
+      totalFee,
       amount,
+      dueAmount,
       mode,
       transaction,
+      paymentDate,
       date,
       proof,
       status,
@@ -299,17 +376,34 @@ exports.updatePayment = async (req, res) => {
       payment.proofFileName = req.file.originalname;
     }
 
+    const finalTotalFee =
+      totalFee !== undefined ? Number(totalFee) || 0 : payment.totalFee;
+
+    const finalAmount =
+      amount !== undefined ? Number(amount) || 0 : payment.amount;
+
+    const finalDueAmount =
+      dueAmount !== undefined && dueAmount !== ""
+        ? Number(dueAmount) || 0
+        : calculateDueAmount(finalTotalFee, finalAmount);
+
     payment.studentName = studentName || payment.studentName;
     payment.studentCode = studentCode || payment.studentCode;
     payment.branch = branch || payment.branch;
     payment.course = course || payment.course;
-    payment.amount = amount !== undefined ? Number(amount) : payment.amount;
+
+    payment.totalFee = finalTotalFee;
+    payment.amount = finalAmount;
+    payment.dueAmount = finalDueAmount;
+
     payment.mode = mode || payment.mode;
     payment.transaction = transaction || payment.transaction;
-    payment.date = date || payment.date;
+    payment.paymentDate = paymentDate || date || payment.paymentDate;
+    payment.date = paymentDate || date || payment.date;
+
     payment.proof = req.file ? payment.proof : proof || payment.proof;
     payment.status = status || payment.status;
-    payment.remarks = remarks || payment.remarks;
+    payment.remarks = remarks !== undefined ? remarks : payment.remarks;
 
     if (status === "Approved" || status === "Rejected") {
       payment.verifiedBy = getLoggedUserId(req);
@@ -318,16 +412,12 @@ exports.updatePayment = async (req, res) => {
 
     await payment.save();
 
-    if (status === "Approved") {
-      await Student.findByIdAndUpdate(payment.studentId, {
-        feeStatus: "Paid",
-      });
+    if (status === "Approved" || status === "Rejected" || oldStatus !== payment.status) {
+      await syncStudentFeeStatus(payment.studentId);
     }
 
-    if (status === "Rejected") {
-      await Student.findByIdAndUpdate(payment.studentId, {
-        feeStatus: "Pending",
-      });
+    if (String(oldStudentId) !== String(payment.studentId)) {
+      await syncStudentFeeStatus(oldStudentId);
     }
 
     if (status && oldStatus !== status) {
@@ -366,7 +456,11 @@ exports.deletePayment = async (req, res) => {
       });
     }
 
+    const studentId = payment.studentId;
+
     await Payment.findByIdAndDelete(payment._id);
+
+    await syncStudentFeeStatus(studentId);
 
     res.json({
       message: "Payment deleted successfully",

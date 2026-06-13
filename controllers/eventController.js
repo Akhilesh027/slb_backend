@@ -1,6 +1,9 @@
 const Event = require("../models/Event.js");
 const Branch = require("../models/Branch.js");
-const { getBranchFilter, restrictBranchAccess } = require("../utils/branchAccess.js");
+const {
+  getBranchFilter,
+  restrictBranchAccess,
+} = require("../utils/branchAccess.js");
 
 const getBranchCode = (branchName = "") => {
   return (
@@ -32,6 +35,11 @@ exports.createEvent = async (req, res) => {
       name,
       type,
       date,
+      startTime,
+      endTime,
+      registrationDeadline,
+      coordinator,
+      eventCoordinator,
       venue,
       branch,
       participants,
@@ -39,11 +47,18 @@ exports.createEvent = async (req, res) => {
       description,
     } = req.body;
 
-    if (!name || !type || !date || !venue || !branch) {
-      return res.status(400).json({
-        message: "Name, type, date, venue and branch are required",
-      });
-    }
+ if (
+  !name?.trim() ||
+  !type?.trim() ||
+  !date ||
+  
+  !branch?.trim()
+) {
+  return res.status(400).json({
+    message: "Name, type, date, venue and branch are required",
+    received: { name, type, date, venue, branch },
+  });
+}
 
     if (!restrictBranchAccess(req, branch)) {
       return res.status(403).json({
@@ -66,6 +81,11 @@ exports.createEvent = async (req, res) => {
       name,
       type,
       date,
+      startTime: startTime || "",
+      endTime: endTime || "",
+      registrationDeadline: registrationDeadline || "",
+      coordinator: coordinator || eventCoordinator || "",
+      eventCoordinator: eventCoordinator || coordinator || "",
       venue,
       branch,
       participants: Number(participants) || 0,
@@ -86,7 +106,14 @@ exports.getEvents = async (req, res) => {
   try {
     const query = getBranchFilter(req, "branch");
 
-    const events = await Event.find(query).sort({ createdAt: -1 });
+    const { type, branch, status, date } = req.query;
+
+    if (type) query.type = type;
+    if (branch) query.branch = branch;
+    if (status) query.status = status;
+    if (date) query.date = date;
+
+    const events = await Event.find(query).sort({ date: -1, createdAt: -1 });
 
     res.json(events);
   } catch (error) {
@@ -104,7 +131,9 @@ exports.getEventById = async (req, res) => {
     const event = await Event.findOne(query);
 
     if (!event) {
-      return res.status(404).json({ message: "Event not found or access denied" });
+      return res
+        .status(404)
+        .json({ message: "Event not found or access denied" });
     }
 
     res.json(event);
@@ -131,6 +160,11 @@ exports.updateEvent = async (req, res) => {
       name,
       type,
       date,
+      startTime,
+      endTime,
+      registrationDeadline,
+      coordinator,
+      eventCoordinator,
       venue,
       branch,
       participants,
@@ -157,12 +191,36 @@ exports.updateEvent = async (req, res) => {
     event.name = name || event.name;
     event.type = type || event.type;
     event.date = date || event.date;
+    event.startTime = startTime !== undefined ? startTime : event.startTime;
+    event.endTime = endTime !== undefined ? endTime : event.endTime;
+    event.registrationDeadline =
+      registrationDeadline !== undefined
+        ? registrationDeadline
+        : event.registrationDeadline;
+
+    event.coordinator =
+      coordinator !== undefined
+        ? coordinator
+        : eventCoordinator !== undefined
+        ? eventCoordinator
+        : event.coordinator;
+
+    event.eventCoordinator =
+      eventCoordinator !== undefined
+        ? eventCoordinator
+        : coordinator !== undefined
+        ? coordinator
+        : event.eventCoordinator;
+
     event.venue = venue || event.venue;
     event.branch = branch || event.branch;
     event.participants =
-      participants !== undefined ? Number(participants) || 0 : event.participants;
+      participants !== undefined
+        ? Number(participants) || 0
+        : event.participants;
     event.status = status || event.status;
-    event.description = description || event.description;
+    event.description =
+      description !== undefined ? description : event.description;
 
     await event.save();
 

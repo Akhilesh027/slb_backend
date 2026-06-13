@@ -6,6 +6,10 @@ const adminRoles = ["admin", "super_admin"];
 
 const isAdmin = (req) => adminRoles.includes(req.user?.role);
 const getUserBranch = (req) => req.user?.branch || "";
+const getLoggedUserId = (req) => req.user?._id || req.user?.id;
+const getLoggedUserName = (req) => req.user?.name || "System User";
+
+const todayDate = () => new Date().toISOString().split("T")[0];
 
 const generateCertificateId = async () => {
   const prefix = "SLB-CER-";
@@ -21,6 +25,7 @@ const generateCertificateId = async () => {
       lastCertificate.certificateId.split("-").pop(),
       10
     );
+
     nextNumber = Number.isNaN(lastNumber) ? 1 : lastNumber + 1;
   }
 
@@ -60,6 +65,10 @@ const restrictBranchAccess = (req, branchName) => {
   return getUserBranch(req) === branchName;
 };
 
+const buildQrCode = (certificateId, studentCode) => {
+  return `${certificateId}-${studentCode}`;
+};
+
 exports.createCertificate = async (req, res) => {
   try {
     const {
@@ -68,9 +77,19 @@ exports.createCertificate = async (req, res) => {
       studentCode,
       branch,
       course,
+      courseCompleted,
       type,
+      issueDate,
       date,
+      facultyApproval,
+      certificateFile,
+      certificateFileName,
+      certificatePdf,
+      certificatePdfName,
+      qrCode,
+      qrCodeName,
       status,
+      remarks,
     } = req.body;
 
     if (!studentId || !type) {
@@ -94,21 +113,43 @@ exports.createCertificate = async (req, res) => {
     }
 
     const certificateId = await generateCertificateId();
-
-    const qrCode = `${certificateId}-${student.studentId}`;
+    const finalStudentCode = studentCode || student.studentId;
+    const finalIssueDate = issueDate || date || todayDate();
+    const approvalStatus = facultyApproval || "Pending";
 
     const certificate = await Certificate.create({
       certificateId,
       studentId: student._id,
       studentName: studentName || student.name,
-      studentCode: studentCode || student.studentId,
+      studentCode: finalStudentCode,
       branch: branch || student.branch,
       course: course || student.course,
+      courseCompleted: courseCompleted || course || student.course,
       type,
-      date: date || new Date().toISOString().split("T")[0],
-      qrCode,
+      issueDate: finalIssueDate,
+      date: finalIssueDate,
+
+      facultyApproval: approvalStatus,
+      approvedBy: approvalStatus === "Approved" ? getLoggedUserId(req) : null,
+      approvedByName:
+        approvalStatus === "Approved" ? getLoggedUserName(req) : "",
+      approvedAt:
+        approvalStatus === "Approved" ? new Date().toISOString() : "",
+
+      certificateFile: certificateFile || certificatePdf || "",
+      certificateFileName:
+        certificateFileName || certificatePdfName || "",
+      certificatePdf: certificatePdf || certificateFile || "",
+      certificatePdfName:
+        certificatePdfName || certificateFileName || "",
+
+      qrCode: qrCode || buildQrCode(certificateId, finalStudentCode),
+      qrCodeName: qrCodeName || "",
+
       status: status || "Generated",
-      generatedBy: req.user?._id || req.user?.id,
+      remarks,
+      generatedBy: getLoggedUserId(req),
+      generatedByName: getLoggedUserName(req),
     });
 
     res.status(201).json({
@@ -126,8 +167,18 @@ exports.getCertificates = async (req, res) => {
   try {
     const query = getCertificateQueryByRole(req);
 
+    const { type, status, facultyApproval, branch, studentId } = req.query;
+
+    if (type) query.type = type;
+    if (status) query.status = status;
+    if (facultyApproval) query.facultyApproval = facultyApproval;
+    if (branch) query.branch = branch;
+    if (studentId) query.studentId = studentId;
+
     const certificates = await Certificate.find(query)
       .populate("studentId", "name studentId branch course batch")
+      .populate("generatedBy", "name email role")
+      .populate("approvedBy", "name email role")
       .sort({ createdAt: -1 });
 
     res.json(certificates);
@@ -145,10 +196,10 @@ exports.getCertificateById = async (req, res) => {
       ...getCertificateQueryByRole(req),
     };
 
-    const certificate = await Certificate.findOne(query).populate(
-      "studentId",
-      "name studentId branch course batch"
-    );
+    const certificate = await Certificate.findOne(query)
+      .populate("studentId", "name studentId branch course batch")
+      .populate("generatedBy", "name email role")
+      .populate("approvedBy", "name email role");
 
     if (!certificate) {
       return res.status(404).json({
@@ -185,32 +236,49 @@ exports.updateCertificate = async (req, res) => {
       studentCode,
       branch,
       course,
+      courseCompleted,
       type,
+      issueDate,
       date,
+      facultyApproval,
+      certificateFile,
+      certificateFileName,
+      certificatePdf,
+      certificatePdfName,
+      qrCode,
+      qrCodeName,
       status,
+      remarks,
     } = req.body;
 
-    if (studentId && String(studentId) !== String(certificate.studentId)) {
-      const student = await findStudentSafely(studentId);
+    let selectedStudent = await Student.findById(certificate.studentId);
 
-      if (!student) {
+    if (studentId && String(studentId) !== String(certificate.studentId)) {
+      selectedStudent = await findStudentSafely(studentId);
+
+      if (!selectedStudent) {
         return res.status(404).json({
           message: "Student not found",
         });
       }
 
-      if (!restrictBranchAccess(req, student.branch)) {
+      if (!restrictBranchAccess(req, selectedStudent.branch)) {
         return res.status(403).json({
           message: "Access denied for selected student branch",
         });
       }
 
-      certificate.studentId = student._id;
-      certificate.studentName = studentName || student.name;
-      certificate.studentCode = studentCode || student.studentId;
-      certificate.branch = branch || student.branch;
-      certificate.course = course || student.course;
-      certificate.qrCode = `${certificate.certificateId}-${student.studentId}`;
+      certificate.studentId = selectedStudent._id;
+      certificate.studentName = studentName || selectedStudent.name;
+      certificate.studentCode = studentCode || selectedStudent.studentId;
+      certificate.branch = branch || selectedStudent.branch;
+      certificate.course = course || selectedStudent.course;
+      certificate.courseCompleted =
+        courseCompleted || course || selectedStudent.course;
+      certificate.qrCode = buildQrCode(
+        certificate.certificateId,
+        selectedStudent.studentId
+      );
     }
 
     if (branch && !restrictBranchAccess(req, branch)) {
@@ -219,13 +287,57 @@ exports.updateCertificate = async (req, res) => {
       });
     }
 
+    const oldApproval = certificate.facultyApproval;
+
     certificate.studentName = studentName || certificate.studentName;
     certificate.studentCode = studentCode || certificate.studentCode;
     certificate.branch = branch || certificate.branch;
     certificate.course = course || certificate.course;
+    certificate.courseCompleted =
+      courseCompleted || certificate.courseCompleted;
     certificate.type = type || certificate.type;
-    certificate.date = date || certificate.date;
+
+    certificate.issueDate = issueDate || date || certificate.issueDate;
+    certificate.date = issueDate || date || certificate.date;
+
+    certificate.facultyApproval =
+      facultyApproval || certificate.facultyApproval;
+
+    if (
+      facultyApproval === "Approved" &&
+      oldApproval !== "Approved"
+    ) {
+      certificate.approvedBy = getLoggedUserId(req);
+      certificate.approvedByName = getLoggedUserName(req);
+      certificate.approvedAt = new Date().toISOString();
+    }
+
+    if (facultyApproval === "Rejected") {
+      certificate.approvedBy = getLoggedUserId(req);
+      certificate.approvedByName = getLoggedUserName(req);
+      certificate.approvedAt = new Date().toISOString();
+    }
+
+    certificate.certificateFile =
+      certificateFile || certificatePdf || certificate.certificateFile;
+    certificate.certificateFileName =
+      certificateFileName ||
+      certificatePdfName ||
+      certificate.certificateFileName;
+
+    certificate.certificatePdf =
+      certificatePdf || certificateFile || certificate.certificatePdf;
+    certificate.certificatePdfName =
+      certificatePdfName ||
+      certificateFileName ||
+      certificate.certificatePdfName;
+
+    certificate.qrCode = qrCode || certificate.qrCode;
+    certificate.qrCodeName = qrCodeName || certificate.qrCodeName;
+
     certificate.status = status || certificate.status;
+    certificate.remarks =
+      remarks !== undefined ? remarks : certificate.remarks;
 
     await certificate.save();
 

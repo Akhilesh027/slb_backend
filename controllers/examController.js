@@ -1,11 +1,16 @@
 const mongoose = require("mongoose");
 const Exam = require("../models/Exam.js");
 const Student = require("../models/Student.js");
+const Faculty = require("../models/Faculty.js");
 
 const adminRoles = ["admin", "super_admin"];
 
 const isAdmin = (req) => adminRoles.includes(req.user?.role);
 const getUserBranch = (req) => req.user?.branch || "";
+const getLoggedUserId = (req) => req.user?._id || req.user?.id;
+const getLoggedUserName = (req) => req.user?.name || "System User";
+
+const todayDate = () => new Date().toISOString().split("T")[0];
 
 const generateExamId = async () => {
   const prefix = "SLB-EXM-";
@@ -66,20 +71,54 @@ const restrictBranchAccess = (req, branchName) => {
   return getUserBranch(req) === branchName;
 };
 
+const getFacultyInfo = async (facultyId, fallbackName = "") => {
+  if (!facultyId) {
+    return {
+      facultyId: null,
+      facultyName: fallbackName || "",
+    };
+  }
+
+  const faculty = await Faculty.findById(facultyId);
+
+  if (!faculty) {
+    return {
+      facultyId: null,
+      facultyName: fallbackName || "",
+    };
+  }
+
+  return {
+    facultyId: faculty._id,
+    facultyName: faculty.name,
+  };
+};
+
 exports.createExam = async (req, res) => {
   try {
     const {
       name,
+      examType,
+      type,
+      examDate,
+      date,
+      startTime,
+      endTime,
       studentId,
       studentName,
       studentCode,
       branch,
       course,
       batch,
+      facultyId,
+      facultyName,
+      examiner,
       practical,
       theory,
       viva,
       status,
+      resultStatus,
+      remarks,
     } = req.body;
 
     if (!name || !studentId) {
@@ -107,11 +146,22 @@ exports.createExam = async (req, res) => {
     const vivaMarks = Number(viva) || 0;
     const total = practicalMarks + theoryMarks + vivaMarks;
 
+    const facultyInfo = await getFacultyInfo(facultyId, facultyName || examiner);
     const examId = await generateExamId();
+
+    const finalExamType = examType || type || "Monthly Assessment";
+    const finalDate = examDate || date || todayDate();
 
     const exam = await Exam.create({
       examId,
       name,
+      examType: finalExamType,
+      type: finalExamType,
+      examDate: finalDate,
+      date: finalDate,
+      startTime: startTime || "",
+      endTime: endTime || "",
+
       studentId: student._id,
       studentName: studentName || student.name,
       studentCode: studentCode || student.studentId,
@@ -120,12 +170,23 @@ exports.createExam = async (req, res) => {
       batch:
         batch ||
         (Array.isArray(student.batch) ? student.batch.join(", ") : student.batch),
+
+      facultyId: facultyInfo.facultyId,
+      facultyName: facultyInfo.facultyName,
+      examiner: examiner || facultyInfo.facultyName,
+
       practical: practicalMarks,
       theory: theoryMarks,
       viva: vivaMarks,
       total,
       grade: getGrade(total),
-      status: status || "Completed",
+
+      resultStatus: resultStatus || status || "Scheduled",
+      status: resultStatus || status || "Scheduled",
+      remarks,
+
+      createdBy: getLoggedUserId(req),
+      createdByName: getLoggedUserName(req),
     });
 
     res.status(201).json({
@@ -141,8 +202,20 @@ exports.getExams = async (req, res) => {
   try {
     const query = getExamQueryByRole(req);
 
+    const { examType, type, branch, course, batch, status, studentId } =
+      req.query;
+
+    if (examType || type) query.examType = examType || type;
+    if (branch) query.branch = branch;
+    if (course) query.course = course;
+    if (batch) query.batch = { $regex: batch, $options: "i" };
+    if (status) query.status = status;
+    if (studentId) query.studentId = studentId;
+
     const exams = await Exam.find(query)
       .populate("studentId", "name studentId branch course batch")
+      .populate("facultyId", "name facultyId assignedBranch status")
+      .populate("createdBy", "name email role")
       .sort({ createdAt: -1 });
 
     res.json(exams);
@@ -158,10 +231,10 @@ exports.getExamById = async (req, res) => {
       ...getExamQueryByRole(req),
     };
 
-    const exam = await Exam.findOne(query).populate(
-      "studentId",
-      "name studentId branch course batch"
-    );
+    const exam = await Exam.findOne(query)
+      .populate("studentId", "name studentId branch course batch")
+      .populate("facultyId", "name facultyId assignedBranch status")
+      .populate("createdBy", "name email role");
 
     if (!exam) {
       return res.status(404).json({
@@ -192,41 +265,56 @@ exports.updateExam = async (req, res) => {
 
     const {
       name,
+      examType,
+      type,
+      examDate,
+      date,
+      startTime,
+      endTime,
       studentId,
       studentName,
       studentCode,
       branch,
       course,
       batch,
+      facultyId,
+      facultyName,
+      examiner,
       practical,
       theory,
       viva,
       status,
+      resultStatus,
+      remarks,
     } = req.body;
 
-    if (studentId && String(studentId) !== String(exam.studentId)) {
-      const student = await findStudentSafely(studentId);
+    let selectedStudent = await Student.findById(exam.studentId);
 
-      if (!student) {
+    if (studentId && String(studentId) !== String(exam.studentId)) {
+      selectedStudent = await findStudentSafely(studentId);
+
+      if (!selectedStudent) {
         return res.status(404).json({
           message: "Student not found",
         });
       }
 
-      if (!restrictBranchAccess(req, student.branch)) {
+      if (!restrictBranchAccess(req, selectedStudent.branch)) {
         return res.status(403).json({
           message: "Access denied for selected student branch",
         });
       }
 
-      exam.studentId = student._id;
-      exam.studentName = studentName || student.name;
-      exam.studentCode = studentCode || student.studentId;
-      exam.branch = branch || student.branch;
-      exam.course = course || student.course;
+      exam.studentId = selectedStudent._id;
+      exam.studentName = studentName || selectedStudent.name;
+      exam.studentCode = studentCode || selectedStudent.studentId;
+      exam.branch = branch || selectedStudent.branch;
+      exam.course = course || selectedStudent.course;
       exam.batch =
         batch ||
-        (Array.isArray(student.batch) ? student.batch.join(", ") : student.batch);
+        (Array.isArray(selectedStudent.batch)
+          ? selectedStudent.batch.join(", ")
+          : selectedStudent.batch);
     }
 
     if (branch && !restrictBranchAccess(req, branch)) {
@@ -237,22 +325,54 @@ exports.updateExam = async (req, res) => {
 
     const practicalMarks =
       practical !== undefined ? Number(practical) || 0 : exam.practical;
-    const theoryMarks = theory !== undefined ? Number(theory) || 0 : exam.theory;
+
+    const theoryMarks =
+      theory !== undefined ? Number(theory) || 0 : exam.theory;
+
     const vivaMarks = viva !== undefined ? Number(viva) || 0 : exam.viva;
+
     const total = practicalMarks + theoryMarks + vivaMarks;
 
+    let facultyInfo = {
+      facultyId: exam.facultyId,
+      facultyName: exam.facultyName,
+    };
+
+    if (facultyId !== undefined) {
+      facultyInfo = await getFacultyInfo(facultyId, facultyName || examiner);
+    }
+
+    const finalExamType = examType || type || exam.examType;
+    const finalDate = examDate || date || exam.examDate;
+
     exam.name = name || exam.name;
+    exam.examType = finalExamType;
+    exam.type = finalExamType;
+
+    exam.examDate = finalDate;
+    exam.date = finalDate;
+    exam.startTime = startTime !== undefined ? startTime : exam.startTime;
+    exam.endTime = endTime !== undefined ? endTime : exam.endTime;
+
     exam.studentName = studentName || exam.studentName;
     exam.studentCode = studentCode || exam.studentCode;
     exam.branch = branch || exam.branch;
     exam.course = course || exam.course;
     exam.batch = batch || exam.batch;
+
+    exam.facultyId = facultyInfo.facultyId;
+    exam.facultyName = facultyInfo.facultyName;
+    exam.examiner = examiner || facultyInfo.facultyName || exam.examiner;
+
     exam.practical = practicalMarks;
     exam.theory = theoryMarks;
     exam.viva = vivaMarks;
     exam.total = total;
     exam.grade = getGrade(total);
-    exam.status = status || exam.status;
+
+    exam.resultStatus = resultStatus || status || exam.resultStatus;
+    exam.status = resultStatus || status || exam.status;
+    exam.remarks = remarks !== undefined ? remarks : exam.remarks;
 
     await exam.save();
 
